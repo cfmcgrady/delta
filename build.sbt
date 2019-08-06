@@ -18,11 +18,16 @@ name := "delta-core"
 
 organization := "io.delta"
 
-crossScalaVersions := Seq("2.12.8", "2.11.12")
+// crossScalaVersions := Seq("2.12.8", "2.11.12")
+crossScalaVersions := Seq("2.11.12")
 
 scalaVersion := crossScalaVersions.value.head
 
-sparkVersion := "2.4.2"
+// sparkVersion := "2.4.2"
+sparkVersion := "2.4.3"
+
+publishTo := Some(Resolver.url("dxy", url("http://nexus.k8s.uc.host.dxy/repository/maven-snapshots/")))
+credentials += Credentials(Path.userHome / ".sbt" / "sonatype_credential")
 
 libraryDependencies ++= Seq(
   // Adding test classifier seems to break transitive resolution of the core dependencies

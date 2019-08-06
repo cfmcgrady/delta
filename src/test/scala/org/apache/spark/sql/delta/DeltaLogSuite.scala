@@ -230,4 +230,22 @@ class DeltaLogSuite extends QueryTest
         === Some(add2.copy(dataChange = false)))
     }
   }
+
+  test("custom configurations should overwrite configurations store in metadata.") {
+    val confKey1 = "spark.databricks.delta.properties.defaults.enableExpiredLogCleanup"
+    val confValue1 = "ture"
+    val confKey2 = "spark.databricks.delta.properties.defaults.logRetentionDuration"
+    val confValue2 = "interval 1 seconds"
+    withTempDir { tempDir =>
+      spark.range(0).write.format("delta").save(tempDir.getCanonicalPath)
+      val dlog1 = DeltaLog.forTable(spark, tempDir.getCanonicalPath)
+      assert(!dlog1.snapshot.metadata.configuration.contains(confKey1))
+      assert(!dlog1.snapshot.metadata.configuration.contains(confKey2))
+      spark.conf.set(confKey1, confValue1)
+      spark.conf.set(confKey2, confValue2)
+      val dlog2 = DeltaLog.forTable(spark, tempDir.getCanonicalPath)
+      assert(spark.sessionState.conf.getConfString(confKey1) == confValue1)
+      assert(spark.sessionState.conf.getConfString(confKey2) == confValue2)
+    }
+  }
 }
