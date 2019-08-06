@@ -47,12 +47,13 @@ trait MetadataCleanup extends DeltaLogging {
   /** Clean up expired delta and checkpoint logs. Exposed for testing. */
   private[delta] def cleanUpExpiredLogs(): Unit = {
     recordDeltaOperation(this, "delta.log.cleanup") {
-      val fileCutOffTime = truncateDay(clock.getTimeMillis() - deltaRetentionMillis).getTime
-      val formattedDate = fileCutOffTime.toGMTString
+//      val fileCutOffTime = truncateDay(clock.getTimeMillis() - deltaRetentionMillis).getTime
+      val fileCutOffTime = clock.getTimeMillis() - deltaRetentionMillis
+      val formattedDate = formatDate(fileCutOffTime)
       logInfo(s"Starting the deletion of log files older than $formattedDate")
 
       var numDeleted = 0
-      listExpiredDeltaLogs(fileCutOffTime.getTime).map(_.getPath).foreach { path =>
+      listExpiredDeltaLogs(fileCutOffTime).map(_.getPath).foreach { path =>
         // recursive = false
         if (fs.delete(path, false)) numDeleted += 1
       }
@@ -92,5 +93,14 @@ trait MetadataCleanup extends DeltaLogging {
     DateUtils.truncate(
       date,
       Calendar.DAY_OF_MONTH)
+  }
+
+  /**
+   * format time for pretty print.
+   */
+  private[delta] def formatDate(timeMillis: Long): String = {
+    val date = Calendar.getInstance(TimeZone.getTimeZone("UTC"))
+    date.setTimeInMillis(timeMillis)
+    date.getTime.toString
   }
 }
