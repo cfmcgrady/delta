@@ -18,11 +18,10 @@ package io.delta.tables.execution
 
 import scala.collection.Map
 
-import org.apache.spark.sql.delta.{DeltaErrors, DeltaHistoryManager, DeltaLog, PreprocessTableUpdate}
-import org.apache.spark.sql.delta.commands.{DeleteCommand, DeltaGenerateCommand, VacuumCommand}
+import org.apache.spark.sql.delta.{DeltaErrors, DeltaHistoryManager, DeltaLog, PreprocessTableOptimize, PreprocessTableUpdate}
+import org.apache.spark.sql.delta.commands.{DeleteCommand, DeltaGenerateCommand, OptimizeCommand, VacuumCommand}
 import org.apache.spark.sql.delta.util.AnalysisHelper
 import io.delta.tables.DeltaTable
-
 import org.apache.spark.sql.{functions, Column, DataFrame, Dataset}
 import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
@@ -62,6 +61,29 @@ trait DeltaTableOperations extends AnalysisHelper { self: DeltaTable =>
     }.toSeq
     val update = UpdateTable(self.toDF.queryExecution.analyzed, assignments, condition.map(_.expr))
     toDataset(sparkSession, update)
+  }
+
+  // scalastyle:off
+  protected def executeOptimize(
+      tableIdentifier: String,
+      condition: Option[Column],
+      zorderByColumnSet: Seq[String]): Unit = {
+//    val tableId: TableIdentifier = sparkSession
+//      .sessionState
+//      .sqlParser
+//      .parseTableIdentifier(tableIdentifier)
+
+    val zorderByColumns = zorderByColumnSet.map(UnresolvedAttribute.quotedString)
+
+    val deltaOptimize = DeltaOptimize(
+      self.toDF.queryExecution.analyzed, condition.map(_.expr), zorderByColumns)
+
+    val resolvedOptimize =
+      PreprocessTableOptimize.resolveReferences(deltaOptimize, tryResolveReferences(sparkSession)(_, deltaOptimize))
+//    val optimizeCommand = PreprocessTableOptimize(sparkSession.sessionState.conf)(resolvedOptimize)
+//    optimizeCommand.asInstanceOf[OptimizeCommand].run(sparkSession)
+    val optimizeCommand = PreprocessTableOptimize.toCommand(resolvedOptimize)
+    optimizeCommand.run(sparkSession)
   }
 
   protected def executeVacuum(

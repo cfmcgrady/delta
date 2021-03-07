@@ -541,6 +541,28 @@ class DeltaTable private[tables](
   def upgradeTableProtocol(readerVersion: Int, writerVersion: Int): Unit = {
     deltaLog.upgradeProtocol(Protocol(readerVersion, writerVersion))
   }
+
+  def optimize(): Unit = {
+    val path = deltaLog.dataPath.toString
+    val table = s"delta.`$path`"
+    executeOptimize(table, None, Seq.empty)
+  }
+
+  def optimize(condition: Column, zorderBy: Seq[String]): Unit = {
+    val path = deltaLog.dataPath.toString
+    val table = s"delta.`$path`"
+    executeOptimize(table, Some(condition), zorderBy)
+  }
+
+  def optimize(zorderBy: Seq[String]): Unit = {
+    val path = deltaLog.dataPath.toString
+    val table = s"delta.`$path`"
+    executeOptimize(table, None, zorderBy)
+  }
+
+  def optimizeExpr(condition: String): Unit = {
+    optimize(functions.expr(condition), Seq.empty)
+  }
 }
 
 /**

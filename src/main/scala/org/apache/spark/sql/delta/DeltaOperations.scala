@@ -168,6 +168,10 @@ object DeltaOperations {
           notMatchedPredicates)
   }
 
+  case class Optimize() extends Operation("OPTIMIZE") {
+    override val parameters: Map[String, Any] = Map.empty
+  }
+
   /** Recorded when an update operation is committed to the table. */
   case class Update(predicate: Option[String]) extends Operation("UPDATE") {
     override val parameters: Map[String, Any] = predicate.map("predicate" -> _).toMap

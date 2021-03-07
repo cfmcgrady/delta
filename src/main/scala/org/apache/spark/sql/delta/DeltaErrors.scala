@@ -799,6 +799,12 @@ object DeltaErrors
     new AnalysisException(s"Non-deterministic functions are not supported in the $op $condStr.")
   }
 
+  def optimizeContainsDataFilterError(op: String, cond: Expression): Throwable = {
+    val condStr = s"(condition = ${cond.sql})."
+    new AnalysisException(s"data filter are not supported in the $op $condStr.")
+  }
+
+
   def noHistoryFound(logPath: Path): Throwable = {
     new AnalysisException(s"No commits found at $logPath")
   }

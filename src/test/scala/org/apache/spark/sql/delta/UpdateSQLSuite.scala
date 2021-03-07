@@ -24,6 +24,13 @@ class UpdateSQLSuite extends UpdateSuiteBase  with DeltaSQLCommandTest {
 
   import testImplicits._
 
+  test("explain2") {
+    append(Seq((2, 2)).toDF("key", "value"))
+    val df = sql(s"UPDATE delta.`$tempPath` SET key = 1, value = 2 WHERE key = 2")
+    df.explain(true)
+    println("xxxxxx")
+  }
+
   test("explain") {
     append(Seq((2, 2)).toDF("key", "value"))
     val df = sql(s"EXPLAIN UPDATE delta.`$tempPath` SET key = 1, value = 2 WHERE key = 2")

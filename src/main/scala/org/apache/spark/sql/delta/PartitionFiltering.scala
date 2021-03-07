@@ -30,14 +30,23 @@ trait PartitionFiltering { self: Snapshot =>
     val partitionFilters = filters.flatMap { filter =>
       DeltaTableUtils.splitMetadataAndDataPredicates(filter, metadata.partitionColumns, spark)._1
     }
+    val dataFilters = filters.flatMap { filter =>
+      DeltaTableUtils.splitMetadataAndDataPredicates(filter, metadata.partitionColumns, spark)._2
+    }
+    // scalastyle:off
+    println(s"partition filter: ${partitionFilters.mkString(".")}")
+    println(s"data filter: ${dataFilters.mkString(".")}")
+
 
     val files = withStatusCode("DELTA", "Filtering files for query") {
       DeltaLog.filterFileList(
         metadata.partitionSchema,
         allFiles.toDF(),
-        partitionFilters).as[AddFile].collect()
+        partitionFilters)
     }
 
-    DeltaScan(version = version, files, null, null, null)(null, null, null, null)
+    // todo:(fchen) limit support
+    DeltaScan(version = version, files, null, null, null)(
+      ExpressionSet(partitionFilters), ExpressionSet(dataFilters), null, AttributeSet(projection))
   }
 }

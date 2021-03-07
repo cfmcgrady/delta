@@ -201,6 +201,9 @@ object DeltaTableUtils extends PredicateHelper
       spark: SparkSession): Boolean = {
     val nameEquality = spark.sessionState.analyzer.resolver
     condition.references.forall { r =>
+      // scalastyle:off
+      println(s"partitoin Columns ${partitionColumns.mkString(".")}")
+      println(s"r.name: ${r.name}")
       partitionColumns.exists(nameEquality(r.name, _))
     }
   }

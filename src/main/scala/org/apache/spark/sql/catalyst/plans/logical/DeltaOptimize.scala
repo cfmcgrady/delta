@@ -6,14 +6,27 @@
  * You may obtain a copy of the License at
  *
  * http://www.apache.org/licenses/LICENSE-2.0
-
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+// scalastyle:off
+package org.apache.spark.sql.catalyst.plans.logical
 
-addSbtPlugin("com.eed3si9n" % "sbt-assembly" % "0.14.9")
+import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, NamedExpression}
 
-addSbtPlugin("io.get-coursier" % "sbt-coursier" % "1.0.3")
+/**
+ * 定义逻辑计划
+ * @param child
+ * @param zorderBy
+ */
+case class DeltaOptimize(
+    child: LogicalPlan,
+    condition: Option[Expression],
+    zorderBy: Seq[NamedExpression])
+  extends UnaryNode {
+  override def output: Seq[Attribute] = Seq.empty
+}
