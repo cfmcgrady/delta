@@ -26,7 +26,6 @@ import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, Expression, GetMapValue, GetStructField, Literal}
 import org.apache.spark.sql.catalyst.plans.logical.{DeltaUpdateTable, Project}
-import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaOperations, DeltaOptions, DeltaTableIdentifier, DeltaTableUtils, OptimisticTransaction}
 import org.apache.spark.sql.delta.actions.{AddFile, FileAction}
 import org.apache.spark.sql.delta.files.TahoeFileIndex
@@ -36,11 +35,10 @@ import org.apache.spark.sql.delta.util.JsonUtils
  * Used to Optimize a delta table.
  */
 case class OptimizeCommand(
-//    tableId: TableIdentifier,
     tahoeFileIndex: TahoeFileIndex,
-//    options: DeltaOptions,
     condition: Option[Expression],
-    zorderBy: Seq[Expression])
+    zorderBy: Seq[Expression],
+    outputFileNum: Int)
   extends RunnableCommand
   with DeltaCommand {
 
@@ -88,7 +86,9 @@ case class OptimizeCommand(
 
     val allFiles = txn.filterFiles(partitionFilter)
     val df = txn.deltaLog.createDataFrame(txn.snapshot, allFiles)
-    val actions = txn.writeFiles(df)
+    val zorderByCols = zorderBy.map(c => DeltaUpdateTable.getTargetColNameParts(c).mkString("."))
+    val indexDF = ZIndexUtil.createZIndex(df, zorderByCols, outputFileNum)
+    val actions = txn.writeFiles(indexDF)
 
     // normilize input file name
     val nameToAddFile = generateCandidateFileMap(deltaLog.dataPath, actions.collect {case add: AddFile => add})
@@ -101,17 +101,9 @@ case class OptimizeCommand(
 
     // todo:(fchen) 转join?
 
-    val zorderByCols = zorderBy.map(c => DeltaUpdateTable.getTargetColNameParts(c).mkString("."))
-
     val statistics = collectTableStatistics(sparkSession, zorderByCols, newDF, getNormalizedFileName)
       .map(fs => (fs.file, fs))
       .toMap
-
-    // scalastyle:off
-    println("-----stats start----")
-    statistics.foreach(println)
-    addFiles.foreach(println)
-    println("-----stats end----")
 
     val addActions = actions.map {
       case addFile: AddFile =>

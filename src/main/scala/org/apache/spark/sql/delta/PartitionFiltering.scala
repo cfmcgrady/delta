@@ -33,10 +33,6 @@ trait PartitionFiltering { self: Snapshot =>
     val dataFilters = filters.flatMap { filter =>
       DeltaTableUtils.splitMetadataAndDataPredicates(filter, metadata.partitionColumns, spark)._2
     }
-    // scalastyle:off
-    println(s"partition filter: ${partitionFilters.mkString(".")}")
-    println(s"data filter: ${dataFilters.mkString(".")}")
-
 
     val files = withStatusCode("DELTA", "Filtering files for query") {
       DeltaLog.filterFileList(

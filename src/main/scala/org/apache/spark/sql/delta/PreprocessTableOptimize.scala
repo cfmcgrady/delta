@@ -43,7 +43,7 @@ object PreprocessTableOptimize {
 
   def toCommand(d: DeltaOptimize): OptimizeCommand = EliminateSubqueryAliases(d.child) match {
     case DeltaFullTable(tahoeFileIndex) =>
-      OptimizeCommand(tahoeFileIndex, d.condition, d.zorderBy)
+      OptimizeCommand(tahoeFileIndex, d.condition, d.zorderBy, d.outputFileNum)
     case o =>
       throw DeltaErrors.notADeltaSourceException("OPTIMIZE", Some(o))
   }
@@ -54,7 +54,7 @@ object PreprocessTableOptimize {
     if (optimize.resolved) return optimize
     assert(optimize.child.resolved)
 
-    val DeltaOptimize(child, condition, zorderBy) = optimize
+    val DeltaOptimize(child, condition, zorderBy, outputFileNum) = optimize
 
     val cleanedUpAttributes = zorderBy.map { unresolvedExpr =>
       // Keep them unresolved but use the cleaned-up name parts from the resolved

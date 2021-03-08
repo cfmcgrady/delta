@@ -542,26 +542,26 @@ class DeltaTable private[tables](
     deltaLog.upgradeProtocol(Protocol(readerVersion, writerVersion))
   }
 
-  def optimize(): Unit = {
+  def optimize(outputFileNum: Int): Unit = {
     val path = deltaLog.dataPath.toString
     val table = s"delta.`$path`"
-    executeOptimize(table, None, Seq.empty)
+    executeOptimize(table, None, Seq.empty, outputFileNum)
   }
 
-  def optimize(condition: Column, zorderBy: Seq[String]): Unit = {
+  def optimize(condition: Column, zorderBy: Seq[String], outputFileNum: Int): Unit = {
     val path = deltaLog.dataPath.toString
     val table = s"delta.`$path`"
-    executeOptimize(table, Some(condition), zorderBy)
+    executeOptimize(table, Some(condition), zorderBy, outputFileNum)
   }
 
-  def optimize(zorderBy: Seq[String]): Unit = {
+  def optimize(zorderBy: Seq[String], outputFileNum: Int): Unit = {
     val path = deltaLog.dataPath.toString
     val table = s"delta.`$path`"
-    executeOptimize(table, None, zorderBy)
+    executeOptimize(table, None, zorderBy, outputFileNum)
   }
 
-  def optimizeExpr(condition: String): Unit = {
-    optimize(functions.expr(condition), Seq.empty)
+  def optimizeExpr(condition: String, outputFileNum: Int): Unit = {
+    optimize(functions.expr(condition), Seq.empty, outputFileNum)
   }
 }
 

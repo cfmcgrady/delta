@@ -67,7 +67,8 @@ trait DeltaTableOperations extends AnalysisHelper { self: DeltaTable =>
   protected def executeOptimize(
       tableIdentifier: String,
       condition: Option[Column],
-      zorderByColumnSet: Seq[String]): Unit = {
+      zorderByColumnSet: Seq[String],
+      outputFileNum: Int): Unit = {
 //    val tableId: TableIdentifier = sparkSession
 //      .sessionState
 //      .sqlParser
@@ -76,7 +77,7 @@ trait DeltaTableOperations extends AnalysisHelper { self: DeltaTable =>
     val zorderByColumns = zorderByColumnSet.map(UnresolvedAttribute.quotedString)
 
     val deltaOptimize = DeltaOptimize(
-      self.toDF.queryExecution.analyzed, condition.map(_.expr), zorderByColumns)
+      self.toDF.queryExecution.analyzed, condition.map(_.expr), zorderByColumns, outputFileNum)
 
     val resolvedOptimize =
       PreprocessTableOptimize.resolveReferences(deltaOptimize, tryResolveReferences(sparkSession)(_, deltaOptimize))

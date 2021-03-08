@@ -26,7 +26,8 @@ import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, NamedEx
 case class DeltaOptimize(
     child: LogicalPlan,
     condition: Option[Expression],
-    zorderBy: Seq[NamedExpression])
+    zorderBy: Seq[NamedExpression],
+    outputFileNum: Int)
   extends UnaryNode {
   override def output: Seq[Attribute] = Seq.empty
 }
