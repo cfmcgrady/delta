@@ -90,7 +90,7 @@ case class OptimizeCommand(
     val indexDF = ZIndexUtil.createZIndex(df, zorderByCols, outputFileNum)
     val actions = txn.writeFiles(indexDF)
 
-    // normilize input file name
+    // normalize input file name
     val nameToAddFile = generateCandidateFileMap(deltaLog.dataPath, actions.collect {case add: AddFile => add})
 
     val getNormalizedFileName = (absolutePath: String) => getTouchedFile(deltaLog.dataPath, absolutePath, nameToAddFile)

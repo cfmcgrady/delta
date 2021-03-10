@@ -22,9 +22,9 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.delta.actions.{AddFile, SingleAction}
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.{Column, DataFrame}
-import org.apache.spark.sql.catalyst.plans.logical.DeltaUpdateTable
+import org.apache.spark.sql.{AnalysisException, Column, DataFrame}
 import org.apache.spark.sql.delta.schema.SchemaUtils
+import org.apache.spark.sql.types.AtomicType
 import org.apache.spark.unsafe.types.UTF8String
 
 /**
@@ -52,7 +52,6 @@ object DataSize {
  */
 case class DeltaScan(
     version: Long,
-    // 这里的文件已经经过分区过滤
     addFiles: DataFrame,
     total: DataSize,
     partition: DataSize,
@@ -69,27 +68,48 @@ case class DeltaScan(
   val spark = addFiles.sparkSession
   import spark.implicits._
 
-  // todo:(fchen) handle checkepointv2
-  lazy val statDF = {
-    println("add files ------")
-
+  lazy val statsSchema = {
     val isStatEmpty = addFiles.select("stats").filter($"stats" isNotNull).isEmpty
-    // todo:(fchen) do we have batter method?
     if (!isStatEmpty) {
-      Option(
-        addFiles.alias("l")
-          .join(
-            addFiles.sparkSession.read.json(addFiles.select("stats").as[String]).alias("r"),
-            $"l.path" === $"r.file",
-            "left")
-          .select($"l.*")
-      )
+      Option(addFiles.sparkSession.read.json(addFiles.select("stats").as[String]).schema)
     } else {
       None
     }
   }
+  // todo:(fchen) handle checkepointv2
+  lazy val statDF = {
+    println("add files ------")
+    statsSchema match {
+      case Some(schema) =>
+        Option(
+          addFiles.withColumn("stats_parsed", from_json($"stats", schema)))
+      case _ => None
+    }
+  }
 
-//  val inCacheColumns = SchemaUtils.explodeNestedFieldNames(statDF.schema)
+  lazy val statsSchemaSet = statsSchema.map(SchemaUtils.explodeNestedFieldNames)
+
+  /**
+   * we only filter [[AtomicType]] column.
+   * @param colName
+   */
+  private def withNotNullColumnStat(colName: Seq[String])(filterCondition: Expression): Expression = {
+
+    val minColNameParts = Seq("minValues") ++ colName
+    val minCol = SchemaUtils.prettyFieldName(minColNameParts)
+    val parsedMinCol = SchemaUtils.prettyFieldName("stats_parsed" +: minColNameParts)
+    statDF match {
+      case Some(df) => {
+        if (statsSchemaSet.get.contains(minCol) &&
+          df.selectExpr(parsedMinCol).schema.head.dataType.isInstanceOf[AtomicType]) {
+          filterCondition
+        } else {
+          Literal(true)
+        }
+      }
+      case None => Literal(true)
+    }
+  }
 
   def files: Array[AddFile] = {
     statDF match {
@@ -97,25 +117,18 @@ case class DeltaScan(
         val condition = withNullStatFileCondition(
           dataFilters.map(rewriteDataFilters).reduce(And)
         )
+        println(condition)
         df.filter(new Column(condition))
-          .select($"l.*")
           .as[AddFile]
           .collect
       case _ =>
         addFiles.as[AddFile].collect
     }
-//    if (dataFilters.nonEmpty && statDF.isDefined) {
-//      val condition = dataFilters.map(rewriteDataFilters).reduce(And)
-//      statDF
-//      addFiles.as[AddFile].collect
-//    } else {
-//      addFiles.as[AddFile].collect
-//    }
   }
 
   // we should include all addFiles which has a null value stats.
   val withNullStatFileCondition =
-    (condition: Expression) => Or(condition, col("l.stats").isNull.expr)
+    (condition: Expression) => Or(condition, col("stats_parsed").isNull.expr)
 
   def allFilters: ExpressionSet = partitionFilters ++ dataFilters ++ unusedFilters
 
@@ -125,137 +138,178 @@ case class DeltaScan(
    * Not场景下，多分区怎么处理？
    */
   def rewriteDataFilters(condition: Expression): Expression = {
-    val minCol = (colName: Seq[String]) => col(("minValues" +: colName).mkString(".")).expr
-    val maxCol = (colName: Seq[String]) => col(("maxValues" +: colName).mkString(".")).expr
-    val nullCol = (colName: Seq[String]) => col(("nullCount" +: colName).mkString(".")).expr
-    val numRecordsCol = col("numRecords").expr
+    val minCol = (colName: Seq[String]) =>
+      col(SchemaUtils.prettyFieldName(Seq("stats_parsed", "minValues") ++ colName)).expr
+    val maxCol = (colName: Seq[String]) =>
+      col(SchemaUtils.prettyFieldName(Seq("stats_parsed", "maxValues") ++ colName)).expr
+    val nullCol = (colName: Seq[String]) =>
+      col(SchemaUtils.prettyFieldName(Seq("stats_parsed", "nullCount") ++ colName)).expr
+    val numRecordsCol = col("stats_parsed.numRecords").expr
+
     condition match {
-        // todo: (fchen) 通过匹配，简化(unapply)
       case et @ EqualTo(_: AttributeReference |
                         _: GetStructField |
                         _: GetMapValue, right: Literal) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(et.left)
-        And(
-          LessThanOrEqual(minCol(colName), right),
-          GreaterThanOrEqual(maxCol(colName), right))
+        val colName = getTargetColNameParts(et.left)
+        withNotNullColumnStat(colName) {
+          And(LessThanOrEqual(minCol(colName), right), GreaterThanOrEqual(maxCol(colName), right))
+        }
 
       case et @ EqualTo(left: Literal, _: AttributeReference |
                                        _: GetStructField |
                                        _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(et.right)
-        And(
-          LessThanOrEqual(minCol(colName), left),
-          GreaterThanOrEqual(maxCol(colName), left))
+        val colName = getTargetColNameParts(et.right)
+        withNotNullColumnStat(colName) {
+          And(
+            LessThanOrEqual(minCol(colName), left),
+            GreaterThanOrEqual(maxCol(colName), left))
+        }
 
       case ens @ EqualNullSafe(_: AttributeReference |
                                _: GetStructField |
                                _: GetMapValue, _ @ Literal(null, _)) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(ens.left)
-        GreaterThan(nullCol(colName), lit(0).expr)
+        val colName = getTargetColNameParts(ens.left)
+        withNotNullColumnStat(colName) {
+          GreaterThan(nullCol(colName), lit(0).expr)
+        }
       case ens @ EqualNullSafe(_ @ Literal(null, _), _: AttributeReference |
                                                      _: GetStructField |
                                                      _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(ens.right)
-        GreaterThan(nullCol(colName), lit(0).expr)
+        val colName = getTargetColNameParts(ens.right)
+        withNotNullColumnStat(colName) {
+          GreaterThan(nullCol(colName), lit(0).expr)
+        }
 
         // the same with EqualTo
       case ens @ EqualNullSafe(_: AttributeReference |
                                _: GetStructField |
                                _: GetMapValue, right @ NonNullLiteral(_, _)) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(ens.left)
-        And(
-          LessThanOrEqual(minCol(colName), right),
-          GreaterThanOrEqual(maxCol(colName), right))
+        val colName = getTargetColNameParts(ens.left)
+        withNotNullColumnStat(colName) {
+          And(
+            LessThanOrEqual(minCol(colName), right),
+            GreaterThanOrEqual(maxCol(colName), right))
+        }
       case ens @ EqualNullSafe(left @ NonNullLiteral(_, _), _: AttributeReference |
                                                             _: GetStructField |
                                                             _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(ens.right)
-        And(
-          LessThanOrEqual(minCol(colName), left),
-          GreaterThanOrEqual(maxCol(colName), left))
+        val colName = getTargetColNameParts(ens.right)
+        withNotNullColumnStat(colName) {
+          And(
+            LessThanOrEqual(minCol(colName), left),
+            GreaterThanOrEqual(maxCol(colName), left))
+        }
 
       case lt @ LessThan(_: AttributeReference |
                          _: GetStructField |
                          _: GetMapValue, right: Literal) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(lt.left)
-        LessThan(minCol(colName), right)
+        val colName = getTargetColNameParts(lt.left)
+        withNotNullColumnStat(colName) {
+          LessThan(minCol(colName), right)
+        }
 
       case lt @ LessThan(left: Literal, _: AttributeReference |
                                         _: GetStructField |
                                         _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(lt.right)
-        GreaterThan(maxCol(colName), left)
+        val colName = getTargetColNameParts(lt.right)
+        withNotNullColumnStat(colName) {
+          GreaterThan(maxCol(colName), left)
+        }
 
       case gt @ GreaterThan(_: AttributeReference |
                             _: GetStructField |
                             _:GetMapValue, right: Literal) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(gt.left)
-        GreaterThan(maxCol(colName), right)
+        val colName = getTargetColNameParts(gt.left)
+        withNotNullColumnStat(colName) {
+          GreaterThan(maxCol(colName), right)
+        }
       case gt @ GreaterThan(left: Literal, _: AttributeReference |
                                            _: GetStructField |
                                            _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(gt.right)
-        LessThan(minCol(colName), left)
-      //        lessThan(gt.right, left)
+        val colName = getTargetColNameParts(gt.right)
+        withNotNullColumnStat(colName) {
+          LessThan(minCol(colName), left)
+        }
 
       case lteq @ LessThanOrEqual(_: AttributeReference |
                                   _: GetStructField |
                                   _: GetMapValue, right: Literal) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(lteq.left)
-        LessThanOrEqual(minCol(colName), right)
+        val colName = getTargetColNameParts(lteq.left)
+        withNotNullColumnStat(colName) {
+          LessThanOrEqual(minCol(colName), right)
+        }
 
       case lteq @ LessThanOrEqual(left: Literal, _: AttributeReference |
                                                  _: GetStructField |
                                                  _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(lteq.right)
-        GreaterThanOrEqual(maxCol(colName), left)
+        val colName = getTargetColNameParts(lteq.right)
+        withNotNullColumnStat(colName) {
+          GreaterThanOrEqual(maxCol(colName), left)
+        }
 
       case gteq @ GreaterThanOrEqual(_: AttributeReference |
                                    _: GetStructField |
                                    _: GetMapValue, right: Literal) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(gteq.left)
-        GreaterThanOrEqual(maxCol(colName), right)
+        val colName = getTargetColNameParts(gteq.left)
+        withNotNullColumnStat(colName) {
+          GreaterThanOrEqual(maxCol(colName), right)
+        }
 
       case gteq @ GreaterThanOrEqual(left: Literal, _: AttributeReference |
                                                     _: GetStructField |
                                                     _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(gteq.right)
-        LessThanOrEqual(minCol(colName), left)
+        val colName = getTargetColNameParts(gteq.right)
+        withNotNullColumnStat(colName) {
+          LessThanOrEqual(minCol(colName), left)
+        }
 
       case isNull @ IsNull(_: AttributeReference | _: GetStructField | _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(isNull.child)
-        GreaterThan(nullCol(colName), lit(0).expr)
+        val colName = getTargetColNameParts(isNull.child)
+        withNotNullColumnStat(colName) {
+          GreaterThan(nullCol(colName), lit(0).expr)
+        }
 
+        // todo:(fchen)map场景下有问题 map['key'] 会判断map not null.
       case isNotNull @ IsNotNull(_: AttributeReference | _: GetStructField | _: GetMapValue) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(isNotNull.child)
-        LessThan(nullCol(colName), numRecordsCol)
+        val colName = getTargetColNameParts(isNotNull.child)
+        withNotNullColumnStat(colName) {
+          LessThan(nullCol(colName), numRecordsCol)
+        }
 
       case in@ In(_: AttributeReference | _: GetStructField | _: GetMapValue, list: Seq[Literal]) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(in.value)
-        list.map(lit => {
-          And(
-            LessThanOrEqual(minCol(colName), lit),
-            GreaterThanOrEqual(maxCol(colName), lit))
-        }).reduce(Or)
+        val colName = getTargetColNameParts(in.value)
+        withNotNullColumnStat(colName) {
+          list.map(lit => {
+            And(
+              LessThanOrEqual(minCol(colName), lit),
+              GreaterThanOrEqual(maxCol(colName), lit))
+          }).reduce(Or)
+        }
 
       case not @ Not(in @ In(_: AttributeReference | _: GetStructField | _: GetMapValue, list: Seq[Literal])) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(in.value)
-        // only exclude file which min/max == inValue
-        list.map(lit => {
-          Not(And(EqualTo(minCol(colName), lit), EqualTo(maxCol(colName), lit)))
-        }).reduce(And)
+        val colName = getTargetColNameParts(in.value)
+        withNotNullColumnStat(colName) {
+          // only exclude file which min/max == inValue
+          list.map(lit => {
+            Not(And(EqualTo(minCol(colName), lit), EqualTo(maxCol(colName), lit)))
+          }).reduce(And)
+        }
 
       case not @ Not(et @ EqualTo(_: AttributeReference |
                                   _: GetStructField |
                                   _: GetMapValue, right: Literal)) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(et.left)
-        Not(And(EqualTo(minCol(colName), right), EqualTo(maxCol(colName), right)))
+        val colName = getTargetColNameParts(et.left)
+        withNotNullColumnStat(colName) {
+          Not(And(EqualTo(minCol(colName), right), EqualTo(maxCol(colName), right)))
+        }
 
       case not @ Not(et @ EqualTo(left: Literal, _: AttributeReference |
                                                  _: GetStructField |
                                                  _: GetMapValue)) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(et.right)
-        Not(And(EqualTo(minCol(colName), left), EqualTo(maxCol(colName), left)))
+        val colName = getTargetColNameParts(et.right)
+        withNotNullColumnStat(colName) {
+          Not(And(EqualTo(minCol(colName), left), EqualTo(maxCol(colName), left)))
+        }
 
       case or: Or =>
         val resLeft = rewriteDataFilters(or.left)
@@ -268,27 +322,52 @@ case class DeltaScan(
         And(resLeft, resRight)
 
       case _ @ StartsWith(attribute, value @ Literal(_: UTF8String, _)) =>
-        val colName = DeltaUpdateTable.getTargetColNameParts(attribute)
-        Or(
-          // min <= value && max >= value
-          And(LessThanOrEqual(minCol(colName), value), GreaterThanOrEqual(maxCol(colName), value)),
-          // if min/max start with value, we should also return this file.
+        val colName = getTargetColNameParts(attribute)
+        withNotNullColumnStat(colName) {
           Or(
-            StartsWith(minCol(colName), value), StartsWith(maxCol(colName), value)))
+            // min <= value && max >= value
+            And(LessThanOrEqual(minCol(colName), value), GreaterThanOrEqual(maxCol(colName), value)),
+
+            // if min/max start with value, we should also return this file.
+            Or(
+              StartsWith(minCol(colName), value), StartsWith(maxCol(colName), value)))
+        }
 
       case expr: Expression =>
         throw new UnsupportedOperationException(s"unsupported expression: ${expr}")
     }
   }
-}
 
-object ParsedColumnName {
-  // todo:(fchen)优化表达式？
-  def unapply(expr: Expression): Option[Seq[String]] = {
-    Option(DeltaUpdateTable.getTargetColNameParts(expr))
+  /**
+   * reference to [[org.apache.spark.sql.catalyst.plans.logical.DeltaUpdateTable.getTargetColNameParts()]].
+   *
+   * Extracts name parts from a resolved expression,
+   * but we should support [[GetMapValue]] in optimize operation.
+   *
+   * @param resolvedTargetCol
+   * @param errMsg
+   * @return
+   */
+  def getTargetColNameParts(resolvedTargetCol: Expression, errMsg: String = null): Seq[String] = {
+
+    def fail(extraMsg: String): Nothing = {
+      val msg = Option(errMsg).map(_ + " - ").getOrElse("") + extraMsg
+      throw new AnalysisException(msg)
+    }
+
+    def extractRecursively(expr: Expression): Seq[String] = expr match {
+      case attr: Attribute => Seq(attr.name)
+
+      case Alias(c, _) => extractRecursively(c)
+
+      case GetStructField(c, _, Some(name)) => extractRecursively(c) :+ name
+
+      case GetMapValue(left, lit: Literal) => extractRecursively(left) :+ lit.eval().toString
+
+      case other =>
+        fail(s"Found unsupported expression '$other' while parsing target column name parts")
+    }
+
+    extractRecursively(resolvedTargetCol)
   }
-}
-
-object UnParsedColumn {
-  
 }

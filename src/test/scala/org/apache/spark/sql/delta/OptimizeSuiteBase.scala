@@ -26,6 +26,7 @@ import scala.collection.JavaConverters._
 import io.delta.tables.DeltaTable
 import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.{Column, DataFrame, QueryTest}
+import org.apache.spark.sql.functions._
 import org.apache.spark.sql.test.{SharedSparkSession, SQLTestUtils}
 import org.apache.spark.util.Utils
 import org.apache.spark.SparkConf
@@ -70,17 +71,30 @@ class OptimizeSuiteBase
     executeUpdate(target, set.mkString(", "), where)
   }
 
-  protected def append(df: DataFrame, partitionBy: Seq[String] = Nil): Unit = {
-    val writer = df.write.format("delta").mode("append")
+  protected def saveTable(
+      df: DataFrame,
+      mode: String,
+      conf: Map[String, String],
+      partitionBy: Seq[String] = Nil): Unit = {
+    val writer = df.write.format("delta").mode(mode)
+    conf.foreach {
+      case (k, v) => writer.option(k, v)
+    }
     if (partitionBy.nonEmpty) {
       writer.partitionBy(partitionBy: _*)
     }
     writer.save(deltaLog.dataPath.toString)
   }
 
-  implicit def jsonStringToSeq(json: String): Seq[String] = json.split("\n")
+  protected def append(df: DataFrame, partitionBy: Seq[String] = Nil) = {
+    saveTable(df, "append", Map.empty, partitionBy)
+  }
 
-  val fileFormat: String = "parquet"
+  protected def overwrite(df: DataFrame, partitionBy: Seq[String] = Nil): Unit = {
+    saveTable(df, "overwrite", Map("mergeSchema" -> "true"), partitionBy)
+  }
+
+  implicit def jsonStringToSeq(json: String): Seq[String] = json.split("\n")
 
   test("aa") {
     val sparkSession = spark
@@ -97,7 +111,6 @@ class OptimizeSuiteBase
     df2.show
     df2.collect()
     println(table.toDF.count)
-
 
     df2.queryExecution.executedPlan.collectLeaves().foreach(l => {
       l.metrics.foreach {
@@ -124,6 +137,8 @@ class OptimizeSuiteBase
     df.show
     append(df, Seq("pid"))
     val table = io.delta.tables.DeltaTable.forPath(spark, deltaLog.dataPath.toString)
+    table.optimize(Seq("col_1"), 16)
+//    Thread.sleep(Int.MaxValue)
     table.optimize(expr("pid = 'a'"), Seq("col_1"), 16)
 //    Thread.sleep(Int.MaxValue)
 //    table.toDF.filter("col_1 = 1").show()
@@ -204,7 +219,7 @@ class OptimizeSuiteBase
       }
   }
 
-  test("dd") {
+  test("zorder by string column basic case.") {
     val sparkSession = spark
     import sparkSession.implicits._
     val input = (1 to 100).map {
@@ -215,29 +230,49 @@ class OptimizeSuiteBase
     val table = io.delta.tables.DeltaTable.forPath(spark, deltaLog.dataPath.toString)
     table.optimize(Seq("col_1"), 20)
 
-    runZorderByFilterTest(
-      table,
-      input,
-      Seq(
-        FilterTestInfo("col_1 = '1'", 1),
-        FilterTestInfo("col_1 = null", None),
-        FilterTestInfo("col_1 < '3'", 3),
-        FilterTestInfo("col_1 > '8'", 3),
-        FilterTestInfo("col_1 is null", 10),
-        FilterTestInfo("col_1 is not null", 10),
-        FilterTestInfo("col_1 in ('1', '9')", 2),
-        FilterTestInfo("col_1 in (null)", None),
-        FilterTestInfo("col_1 not in ('1', '9')", 10),
-        FilterTestInfo("col_1 not in ('1', '9', null)", 0),
-        FilterTestInfo("col_1 in (select null)", None),
-        FilterTestInfo("col_1 not in (select null)", None),
-        FilterTestInfo("col_1 in ('1', null)", 1),
-        FilterTestInfo("col_1 like '1%'", 2),
-        FilterTestInfo("col_1 <=> null", 10),
-        FilterTestInfo("col_1 <=> '1'", 1)
-      )
+    val filters = Seq(
+      FilterTestInfo("col_1 = '1'", 1),
+      FilterTestInfo("col_1 = null", None),
+      FilterTestInfo("col_1 < '3'", 3),
+      FilterTestInfo("col_1 > '8'", 3),
+      FilterTestInfo("col_1 is null", 10),
+      FilterTestInfo("col_1 is not null", 10),
+      FilterTestInfo("col_1 in ('1', '9')", 2),
+      FilterTestInfo("col_1 in (null)", None),
+      FilterTestInfo("col_1 not in ('1', '9')", 10),
+      FilterTestInfo("col_1 not in ('1', '9', null)", 0),
+      FilterTestInfo("col_1 in (select null)", None),
+      FilterTestInfo("col_1 not in (select null)", None),
+      FilterTestInfo("col_1 in ('1', null)", 1),
+      FilterTestInfo("col_1 like '1%'", 2),
+      FilterTestInfo("col_1 <=> null", 10),
+      FilterTestInfo("col_1 <=> '1'", 1),
+      FilterTestInfo("NOT EXISTS (SELECT null)", None)
     )
+    runZorderByFilterTest(table, input, filters)
+
+    // column without statistics should also work fine.
+    val input2 = input.withColumn("fake_column_with_statistics", lit("fake_value"))
+    overwrite(input2)
+    table.optimize(Seq("fake_column_with_statistics"), 20)
+    val newFilters = filters.map {
+      case f if f.numFiles == None => f
+      // without column statistics, delta should read all of files, so we set numFiles == 20
+      case f: FilterTestInfo => f.copy(numFiles = Option(20))
+    }
+    runZorderByFilterTest(table, input, newFilters)
   }
+
+  test("filter contains stat/non-stat column.") {
+    val sparkSession = spark
+    import sparkSession.implicits._
+    val input = Seq(("a", "a"), ("b", "b"), ("c", "c")).toDF("col_1", "col_2")
+    append(input)
+    val table = io.delta.tables.DeltaTable.forPath(spark, deltaLog.dataPath.toString)
+    table.optimize(Seq("col_1"), 3)
+    runZorderByFilterTest(table, input, Seq(FilterTestInfo("col_1 == 'a' or col_2 == 'c'", 3)))
+  }
+
 
   test("file filter with not in condition") {
     val sparkSession = spark
@@ -269,6 +304,49 @@ class OptimizeSuiteBase
     table.toDF.filter("col_1 <> 'a'").explain(true)
   }
 
+  test("xx") {
+    val sparkSession = spark
+    import sparkSession.implicits._
+    import org.apache.spark.sql.functions._
+//    val input = spark.range(0, 32)
+//      .withColumn("pid", $"id" % 2)
+////      .repartition(16)
+////      .parti
+//
+//    val writer = input.write.format("delta")
+//    writer.partitionBy("pid")
+//    println(deltaLog.dataPath.toString)
+//    writer.save(deltaLog.dataPath.toString)
+//    Thread.sleep(Int.MaxValue)
+    val jsona = """
+      |{
+      |  "a": 1,
+      |  "b": {
+      |    "c": "value_c",
+      |    "d": {
+      |      "e": "value_3",
+      |      "f": 1.0
+      |    }
+      |  }
+      |}
+      |""".stripMargin
+    val jsonb =
+      """
+        |{"a": "b"}
+        |""".stripMargin
+
+    val jdf = spark.read.json(spark.sparkContext.parallelize(Seq(jsona)))
+    jdf.show
+    jdf.printSchema()
+
+    Seq(jsona).toDF("ca").show()
+    Seq(jsona).toDF("ca")
+      .withColumn("parsed_value", from_json($"ca", jdf.schema))
+//      .show()
+      .printSchema()
+
+  }
+
   private def runZorderByFilterTest(table: DeltaTable,
                                     input: DataFrame,
                                     conditions: Seq[FilterTestInfo]): Unit = {
@@ -296,7 +374,6 @@ class OptimizeSuiteBase
   test("zorder by support map type") {
     val sparkSession = spark
     import sparkSession.implicits._
-    import org.apache.spark.sql.functions._
 
     val input = (1 to 100).map(i => {
       val info = if (i < 50) "a" else "b"
@@ -314,10 +391,6 @@ class OptimizeSuiteBase
         FilterTestInfo("col_2['info'] == 'a'", 3)
       )
     )
-  }
-
-  test("delta filter with no statistics column should work fine.") {
-    // todo:(fchen)
   }
 
   override def sparkConf: SparkConf = {
@@ -367,3 +440,4 @@ object FilterTestInfo {
 //  override protected def executeUpdate(target: String, set: String, where: String): Unit = ???
 //}
 
+case class TestCaseClass(info: String)
