@@ -20,10 +20,13 @@ organization := "io.delta"
 
 scalaVersion := "2.12.10"
 
-sparkVersion := "3.0.2"
+sparkVersion := "3.0.1"
 
 skip in update := true
 // skip in compile := true
+
+publishTo := Some(Resolver.url("dxy", url("http://nexus.k8s.uc.host.dxy/repository/maven-snapshots/")))
+credentials += Credentials(Path.userHome / ".sbt" / "sonatype_credential")
 
 libraryDependencies ++= Seq(
   // Adding test classifier seems to break transitive resolution of the core dependencies
@@ -229,10 +232,6 @@ pomExtra :=
         <url>https://github.com/zsxwing</url>
       </developer>
     </developers>
-
-bintrayOrganization := Some("delta-io")
-
-bintrayRepository := "delta"
 
 import ReleaseTransformations._
 
