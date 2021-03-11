@@ -13,20 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// scalastyle:off
-// todo:(fchen) fix style
+
 package org.apache.spark.sql.delta.commands
 
 import java.util.UUID
 
 import scala.collection.mutable.HashMap
 
-import org.apache.hadoop.fs.Path
 import org.apache.spark.sql.execution.command.RunnableCommand
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
-import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, Expression, GetMapValue, GetStructField, Literal}
-import org.apache.spark.sql.catalyst.plans.logical.{DeltaUpdateTable, Project}
-import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaOperations, DeltaOptions, DeltaTableIdentifier, DeltaTableUtils, OptimisticTransaction}
+import org.apache.spark.sql.catalyst.expressions.Expression
+import org.apache.spark.sql.catalyst.plans.logical.{DeltaOptimize, DeltaUpdateTable, Project}
+import org.apache.spark.sql.delta.{DeltaErrors, DeltaLog, DeltaOperations, DeltaTableUtils, OptimisticTransaction}
 import org.apache.spark.sql.delta.actions.{AddFile, FileAction}
 import org.apache.spark.sql.delta.files.TahoeFileIndex
 import org.apache.spark.sql.delta.util.JsonUtils
@@ -44,15 +42,6 @@ case class OptimizeCommand(
 
   override def run(sparkSession: SparkSession): Seq[Row] = {
 
-//    val tablePath = DeltaTableIdentifier(sparkSession, tableId) match {
-//      case Some(id) if id.path.isDefined =>
-//        new Path(id.path.get)
-//      case _ =>
-//        new Path(sparkSession.sessionState.catalog.getTableMetadata(tableId).location)
-//    }
-
-
-//    val deltaLog = DeltaLog.forTable(sparkSession, tablePath)
     val deltaLog = tahoeFileIndex.deltaLog
 
     if (deltaLog.snapshot.version < 0) {
@@ -60,10 +49,6 @@ case class OptimizeCommand(
     }
 
     deltaLog.withNewTransaction { txn =>
-//      val actions = write(txn, sparkSession)
-//      val operation = DeltaOperations.Write(mode, Option(partitionColumns),
-//        options.replaceWhere, options.userMetadata)
-//      txn.commit(actions, operation)
       val actions = performOptimize(sparkSession, deltaLog, txn)
       txn.commit(actions, DeltaOperations.Optimize())
     }
@@ -91,24 +76,25 @@ case class OptimizeCommand(
     val actions = txn.writeFiles(indexDF)
 
     // normalize input file name
-    val nameToAddFile = generateCandidateFileMap(deltaLog.dataPath, actions.collect {case add: AddFile => add})
+    val nameToAddFile = generateCandidateFileMap(
+      deltaLog.dataPath,
+      actions.collect {case add: AddFile => add})
 
-    val getNormalizedFileName = (absolutePath: String) => getTouchedFile(deltaLog.dataPath, absolutePath, nameToAddFile)
+    val getNormalizedFileName =
+      (absolutePath: String) => getTouchedFile(deltaLog.dataPath, absolutePath, nameToAddFile)
 
     val addFiles = actions.collect {case add: AddFile => add}
 
     val newDF = txn.deltaLog.createDataFrame(txn.snapshot, addFiles)
 
-    // todo:(fchen) 转join?
-
-    val statistics = collectTableStatistics(sparkSession, zorderByCols, newDF, getNormalizedFileName)
-      .map(fs => (fs.file, fs))
-      .toMap
+    val statistics =
+      collectTableStatistics(sparkSession, zorderByCols, newDF, getNormalizedFileName)
+        .map(fs => (fs.file, fs))
+        .toMap
 
     val addActions = actions.map {
       case addFile: AddFile =>
         val stats = JsonUtils.toJson(statistics.get(addFile.path))
-//        println(JsonUtils.toPrettyJson(statistics.get(addFile.path)))
         addFile.copy(stats = stats, dataChange = false)
       case action: FileAction => action
     }
@@ -125,9 +111,6 @@ case class OptimizeCommand(
                              getNormalizedFileName: (String) => AddFile): Array[FileStatistics] = {
     val tempView = s"__cache_${UUID.randomUUID().toString.replace("-", "")}"
 
-//    val tempDF = spark.read
-//      .format(inputFormat)
-//      .load(inputPath)
     val tempDF = data
     tempDF.createOrReplaceTempView(tempView)
 
@@ -158,9 +141,6 @@ case class OptimizeCommand(
           val numNonNullRecords = r.getAs[Long](countColName(c))
           val nullCount: Any = numRecords - numNonNullRecords
 //          (
-//            normalizedColName.foldRight(min)((cn, min) => Map(cn -> min)),
-//            normalizedColName.foldRight(max)((cn, max) => Map(cn -> max)),
-//            normalizedColName.foldRight(nullCount)((cn, nc) => Map(cn -> nc)))
           normalizedColName.foldRight((min, max, nullCount)) {
             case (c, (min, max, nullCount)) =>
               (Map(c -> min), Map(c -> max), Map(c -> nullCount))
@@ -178,44 +158,6 @@ case class OptimizeCommand(
       })
   }
 
-//  /**
-//   * Scan all the affected files and write out the optimized files
-//   */
-//  private def rewriteFiles(
-//      spark: SparkSession,
-//      txn: OptimisticTransaction,
-//      rootPath: Path,
-//      inputLeafFiles: Seq[String],
-//      nameToAddFileMap: Map[String, AddFile]): Seq[FileAction] = {
-//    // Containing the map from the relative file path to AddFile
-//    val baseRelation = buildBaseRelation(
-//      spark, txn, "optimize", rootPath, inputLeafFiles, nameToAddFileMap)
-//    val newTarget = DeltaTableUtils.replaceFileIndex(target, baseRelation.location)
-//    val targetDf = Dataset.ofRows(spark, newTarget)
-//    val updatedDataFrame = {
-//      val updatedColumns = buildUpdatedColumns(condition)
-//      targetDf.select(updatedColumns: _*)
-//    }
-//
-//    txn.writeFiles(updatedDataFrame)
-//  }
-
-  def extractRecursively(expr: Expression): Seq[String] = expr match {
-    case attr: Attribute => Seq(attr.name)
-
-    case Alias(c, _) => extractRecursively(c)
-
-    case GetStructField(c, _, Some(name)) => extractRecursively(c) :+ name
-
-    case GetMapValue(left, lit: Literal) => extractRecursively(left) :+ lit.eval().toString
-
-    //    case _: ExtractValue =>
-    //      throw new RuntimeException("extract nested fields is only supported for StructType.")
-    case other =>
-      throw new RuntimeException(
-        s"Found unsupported expression '$other' while parsing target column name parts")
-  }
-
   private def getNormalizedColumnName(df: DataFrame, colName: String): Seq[String] = {
     df.selectExpr(colName)
       .queryExecution
@@ -223,7 +165,7 @@ case class OptimizeCommand(
       .collect {case proj: Project => proj}
       .headOption
       .map(proj => {
-        extractRecursively(proj.projectList.head)
+        DeltaOptimize.getTargetColNameParts(proj.projectList.head)
       })
       .getOrElse {
         throw new RuntimeException(s"can't normalize the ${colName}")

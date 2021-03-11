@@ -1,5 +1,19 @@
-// scalastyle:off
-// todo:(fchen) fix style
+/*
+ * Copyright (2020) The Delta Lake Project Authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package org.apache.spark.sql.delta.commands
 
 import java.util.UUID
@@ -11,59 +25,17 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.storage.StorageLevel
 
-/**
- * @time 2021/3/7 5:31 下午
- * @author fchen <cloud.chenfu@gmail.com>
- */
 trait ZIndex[T] {
 
   def indices: T
 
   def toBinaryString: String
 
-  /**
-   * @return 1 means this > that, 0 means this = that, -1 means this < that.
-   */
-  def compare(that: ZIndex[T]): Int
-
-  def >=(that: ZIndex[T]): Boolean = {
-    val f = compare(that)
-    f == 1 || f == 0
-  }
-
-  def >(that: ZIndex[T]): Boolean = {
-    val f = compare(that)
-    f == 1
-  }
-
-  def <=(that: ZIndex[T]): Boolean = {
-    val f = compare(that)
-    f == -1 || f == 0
-  }
-
-  def <(that: ZIndex[T]): Boolean = {
-    val f = compare(that)
-    f == -1
-  }
 }
 
 case class ArrayZIndex(override val indices: Array[Int]) extends ZIndex[Array[Int]] {
   override def toBinaryString: String = {
     indices.mkString("")
-  }
-
-  /**
-   * @return 1 means this > that, 0 means this = that, -1 means this < that.
-   */
-  override def compare(that: ZIndex[Array[Int]]): Int = {
-    require(this.indices.length == that.indices.length)
-    for (i <- (0 until indices.length)) {
-      val diff = indices(i) - that.indices(i)
-      if (diff != 0) {
-        return diff
-      }
-    }
-    return 0
   }
 }
 
@@ -97,17 +69,6 @@ object ZIndexUtil {
         colName,
         s"__${UUID.randomUUID().toString.replace("-", "")}__"
       )
-  }
-  private val minColName = {
-    (colName: String) => s"__min_${indexColName(colName)}__"
-  }
-
-  private val maxColName = {
-    (colName: String) => s"__max_${indexColName(colName)}__"
-  }
-
-  private val countColName = {
-    (colName: String) => s"__count_${indexColName(colName)}__"
   }
 
   def createZIndex(
@@ -143,14 +104,11 @@ object ZIndexUtil {
       .selectExpr(dataSchema: _*)
   }
 
+  // scalastyle:off line.size.limit
   /**
    * reference: https://medium.com/swlh/computing-global-rank-of-a-row-in-a-dataframe-with-spark-sql-34f6cc650ae5
-   *
-   * @param df
-   * @param colName
-   * @param rankColName
-   * @return
    */
+  // scalastyle:on line.size.limit
   def generateGlobalRankId(df: DataFrame, colName: String, rankColName: String): DataFrame = {
 
     // if the input column is a nested column, we should normalize the input column name.
@@ -167,8 +125,7 @@ object ZIndexUtil {
     import spark.implicits._
 
     val partDF = df
-      .orderBy(colName) // ==> 通过range partition来实现的
-      // =====> 在这里实现bin packing 的分区方法？
+      .orderBy(colName)
       .withColumn("partitionId", spark_partition_id())
 
     //    partDF.createOrReplaceTempView("aaa")
@@ -200,9 +157,9 @@ object ZIndexUtil {
       coalesce(col("r.cum_rank"), lit(0)).alias("sum_factor")
     )
 
-    // todo: (fchen) 转为long类型
+    // todo:(fchen) return long type rankCol, so that we have max Long.MaxValue table size.
     val finalDF = rankDF.join(
-      broadcast(joinDF), Seq("partitionId"),"inner")
+      broadcast(joinDF), Seq("partitionId"), "inner")
       .withColumn(rankColName, ($"local_rank" + $"sum_factor" - 1).cast(IntegerType))
 
     rankDF.unpersist()

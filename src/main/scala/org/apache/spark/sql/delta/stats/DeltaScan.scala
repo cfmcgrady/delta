@@ -14,15 +14,15 @@
  * limitations under the License.
  */
 
-// scalastyle:off
-// todo:(fchen) fix style
 package org.apache.spark.sql.delta.stats
 
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.delta.actions.{AddFile, SingleAction}
-import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.{AnalysisException, Column, DataFrame}
+import org.apache.spark.sql.catalyst.plans.logical.DeltaOptimize
 import org.apache.spark.sql.delta.schema.SchemaUtils
 import org.apache.spark.sql.types.AtomicType
 import org.apache.spark.unsafe.types.UTF8String
@@ -62,7 +62,7 @@ case class DeltaScan(
     val partitionFilters: ExpressionSet,
     val dataFilters: ExpressionSet,
     val unusedFilters: ExpressionSet,
-    val projection: AttributeSet) {
+    val projection: AttributeSet) extends Logging {
 
   implicit val enc = SingleAction.addFileEncoder
   val spark = addFiles.sparkSession
@@ -78,7 +78,6 @@ case class DeltaScan(
   }
   // todo:(fchen) handle checkepointv2
   lazy val statDF = {
-    println("add files ------")
     statsSchema match {
       case Some(schema) =>
         Option(
@@ -89,35 +88,13 @@ case class DeltaScan(
 
   lazy val statsSchemaSet = statsSchema.map(SchemaUtils.explodeNestedFieldNames)
 
-  /**
-   * we only filter [[AtomicType]] column.
-   * @param colName
-   */
-  private def withNotNullColumnStat(colName: Seq[String])(filterCondition: Expression): Expression = {
-
-    val minColNameParts = Seq("minValues") ++ colName
-    val minCol = SchemaUtils.prettyFieldName(minColNameParts)
-    val parsedMinCol = SchemaUtils.prettyFieldName("stats_parsed" +: minColNameParts)
-    statDF match {
-      case Some(df) => {
-        if (statsSchemaSet.get.contains(minCol) &&
-          df.selectExpr(parsedMinCol).schema.head.dataType.isInstanceOf[AtomicType]) {
-          filterCondition
-        } else {
-          Literal(true)
-        }
-      }
-      case None => Literal(true)
-    }
-  }
-
-  def files: Array[AddFile] = {
+  lazy val files: Array[AddFile] = {
     statDF match {
       case Some(df) if dataFilters.nonEmpty =>
         val condition = withNullStatFileCondition(
           dataFilters.map(rewriteDataFilters).reduce(And)
         )
-        println(condition)
+        logInfo(s"delta log filter condition ${condition}")
         df.filter(new Column(condition))
           .as[AddFile]
           .collect
@@ -134,10 +111,23 @@ case class DeltaScan(
 
   // todo:(fchen) limit support
   /**
-   * 根据输入改过滤条件，用于过滤文件
-   * Not场景下，多分区怎么处理？
+   * according the data filter condition, rewrite an new condition for delta log filter.
    */
   def rewriteDataFilters(condition: Expression): Expression = {
+    def withNotNullColumnStat(expression: Expression
+                             )(filterCondition: (Seq[String]) => Expression): Expression = {
+      val colName = DeltaOptimize.getTargetColNameParts(expression)
+      val minColNameParts = Seq("minValues") ++ colName
+      val minCol = SchemaUtils.prettyFieldName(minColNameParts)
+      val parsedMinCol = SchemaUtils.prettyFieldName("stats_parsed" +: minColNameParts)
+      statDF match {
+        case Some(df) if (statsSchemaSet.get.contains(minCol) &&
+          df.selectExpr(parsedMinCol).schema.head.dataType.isInstanceOf[AtomicType]) =>
+          filterCondition(colName)
+        case _ => Literal(true)
+      }
+    }
+
     val minCol = (colName: Seq[String]) =>
       col(SchemaUtils.prettyFieldName(Seq("stats_parsed", "minValues") ++ colName)).expr
     val maxCol = (colName: Seq[String]) =>
@@ -150,165 +140,155 @@ case class DeltaScan(
       case et @ EqualTo(_: AttributeReference |
                         _: GetStructField |
                         _: GetMapValue, right: Literal) =>
-        val colName = getTargetColNameParts(et.left)
-        withNotNullColumnStat(colName) {
-          And(LessThanOrEqual(minCol(colName), right), GreaterThanOrEqual(maxCol(colName), right))
+        withNotNullColumnStat(et.left) {
+          colName =>
+            And(LessThanOrEqual(minCol(colName), right), GreaterThanOrEqual(maxCol(colName), right))
         }
 
       case et @ EqualTo(left: Literal, _: AttributeReference |
                                        _: GetStructField |
                                        _: GetMapValue) =>
-        val colName = getTargetColNameParts(et.right)
-        withNotNullColumnStat(colName) {
-          And(
-            LessThanOrEqual(minCol(colName), left),
-            GreaterThanOrEqual(maxCol(colName), left))
+        withNotNullColumnStat(et.right) {
+          colName =>
+            And(
+              LessThanOrEqual(minCol(colName), left),
+              GreaterThanOrEqual(maxCol(colName), left))
         }
 
       case ens @ EqualNullSafe(_: AttributeReference |
                                _: GetStructField |
                                _: GetMapValue, _ @ Literal(null, _)) =>
-        val colName = getTargetColNameParts(ens.left)
-        withNotNullColumnStat(colName) {
-          GreaterThan(nullCol(colName), lit(0).expr)
+        withNotNullColumnStat(ens.left) {
+          colName =>
+            GreaterThan(nullCol(colName), lit(0).expr)
         }
+
       case ens @ EqualNullSafe(_ @ Literal(null, _), _: AttributeReference |
                                                      _: GetStructField |
                                                      _: GetMapValue) =>
-        val colName = getTargetColNameParts(ens.right)
-        withNotNullColumnStat(colName) {
-          GreaterThan(nullCol(colName), lit(0).expr)
+        withNotNullColumnStat(ens.right) {
+          colName =>
+            GreaterThan(nullCol(colName), lit(0).expr)
         }
 
-        // the same with EqualTo
+      // the same with EqualTo
       case ens @ EqualNullSafe(_: AttributeReference |
                                _: GetStructField |
                                _: GetMapValue, right @ NonNullLiteral(_, _)) =>
-        val colName = getTargetColNameParts(ens.left)
-        withNotNullColumnStat(colName) {
-          And(
-            LessThanOrEqual(minCol(colName), right),
-            GreaterThanOrEqual(maxCol(colName), right))
+        withNotNullColumnStat(ens.left) {
+          colName =>
+            And(
+              LessThanOrEqual(minCol(colName), right),
+              GreaterThanOrEqual(maxCol(colName), right))
         }
       case ens @ EqualNullSafe(left @ NonNullLiteral(_, _), _: AttributeReference |
                                                             _: GetStructField |
                                                             _: GetMapValue) =>
-        val colName = getTargetColNameParts(ens.right)
-        withNotNullColumnStat(colName) {
-          And(
-            LessThanOrEqual(minCol(colName), left),
-            GreaterThanOrEqual(maxCol(colName), left))
+        withNotNullColumnStat(ens.right) {
+          colName =>
+            And(
+              LessThanOrEqual(minCol(colName), left),
+              GreaterThanOrEqual(maxCol(colName), left))
         }
 
       case lt @ LessThan(_: AttributeReference |
                          _: GetStructField |
                          _: GetMapValue, right: Literal) =>
-        val colName = getTargetColNameParts(lt.left)
-        withNotNullColumnStat(colName) {
-          LessThan(minCol(colName), right)
+        withNotNullColumnStat(lt.left) {
+          colName => LessThan(minCol(colName), right)
         }
 
       case lt @ LessThan(left: Literal, _: AttributeReference |
                                         _: GetStructField |
                                         _: GetMapValue) =>
-        val colName = getTargetColNameParts(lt.right)
-        withNotNullColumnStat(colName) {
-          GreaterThan(maxCol(colName), left)
+        withNotNullColumnStat(lt.right) {
+          colName => GreaterThan(maxCol(colName), left)
         }
 
       case gt @ GreaterThan(_: AttributeReference |
                             _: GetStructField |
-                            _:GetMapValue, right: Literal) =>
-        val colName = getTargetColNameParts(gt.left)
-        withNotNullColumnStat(colName) {
-          GreaterThan(maxCol(colName), right)
+                            _: GetMapValue, right: Literal) =>
+        withNotNullColumnStat(gt.left) {
+          colName => GreaterThan(maxCol(colName), right)
         }
       case gt @ GreaterThan(left: Literal, _: AttributeReference |
                                            _: GetStructField |
                                            _: GetMapValue) =>
-        val colName = getTargetColNameParts(gt.right)
-        withNotNullColumnStat(colName) {
-          LessThan(minCol(colName), left)
+        withNotNullColumnStat(gt.right) {
+          colName => LessThan(minCol(colName), left)
         }
 
       case lteq @ LessThanOrEqual(_: AttributeReference |
                                   _: GetStructField |
                                   _: GetMapValue, right: Literal) =>
-        val colName = getTargetColNameParts(lteq.left)
-        withNotNullColumnStat(colName) {
-          LessThanOrEqual(minCol(colName), right)
+        withNotNullColumnStat(lteq.left) {
+          colName => LessThanOrEqual(minCol(colName), right)
         }
 
       case lteq @ LessThanOrEqual(left: Literal, _: AttributeReference |
                                                  _: GetStructField |
                                                  _: GetMapValue) =>
-        val colName = getTargetColNameParts(lteq.right)
-        withNotNullColumnStat(colName) {
-          GreaterThanOrEqual(maxCol(colName), left)
+        withNotNullColumnStat(lteq.right) {
+          colName => GreaterThanOrEqual(maxCol(colName), left)
         }
 
       case gteq @ GreaterThanOrEqual(_: AttributeReference |
                                    _: GetStructField |
                                    _: GetMapValue, right: Literal) =>
-        val colName = getTargetColNameParts(gteq.left)
-        withNotNullColumnStat(colName) {
-          GreaterThanOrEqual(maxCol(colName), right)
+        withNotNullColumnStat(gteq.left) {
+          colName => GreaterThanOrEqual(maxCol(colName), right)
         }
 
       case gteq @ GreaterThanOrEqual(left: Literal, _: AttributeReference |
                                                     _: GetStructField |
                                                     _: GetMapValue) =>
-        val colName = getTargetColNameParts(gteq.right)
-        withNotNullColumnStat(colName) {
-          LessThanOrEqual(minCol(colName), left)
+        withNotNullColumnStat(gteq.right) {
+          colName => LessThanOrEqual(minCol(colName), left)
         }
 
       case isNull @ IsNull(_: AttributeReference | _: GetStructField | _: GetMapValue) =>
-        val colName = getTargetColNameParts(isNull.child)
-        withNotNullColumnStat(colName) {
-          GreaterThan(nullCol(colName), lit(0).expr)
+        withNotNullColumnStat(isNull.child) {
+          colName => GreaterThan(nullCol(colName), lit(0).expr)
         }
 
-        // todo:(fchen)map场景下有问题 map['key'] 会判断map not null.
       case isNotNull @ IsNotNull(_: AttributeReference | _: GetStructField | _: GetMapValue) =>
-        val colName = getTargetColNameParts(isNotNull.child)
-        withNotNullColumnStat(colName) {
-          LessThan(nullCol(colName), numRecordsCol)
+        withNotNullColumnStat(isNotNull.child) {
+          colName => LessThan(nullCol(colName), numRecordsCol)
         }
 
       case in@ In(_: AttributeReference | _: GetStructField | _: GetMapValue, list: Seq[Literal]) =>
-        val colName = getTargetColNameParts(in.value)
-        withNotNullColumnStat(colName) {
-          list.map(lit => {
-            And(
-              LessThanOrEqual(minCol(colName), lit),
-              GreaterThanOrEqual(maxCol(colName), lit))
-          }).reduce(Or)
+        withNotNullColumnStat(in.value) {
+          colName =>
+            list.map(lit => {
+              And(
+                LessThanOrEqual(minCol(colName), lit),
+                GreaterThanOrEqual(maxCol(colName), lit))
+            }).reduce(Or)
         }
 
-      case not @ Not(in @ In(_: AttributeReference | _: GetStructField | _: GetMapValue, list: Seq[Literal])) =>
-        val colName = getTargetColNameParts(in.value)
-        withNotNullColumnStat(colName) {
-          // only exclude file which min/max == inValue
-          list.map(lit => {
-            Not(And(EqualTo(minCol(colName), lit), EqualTo(maxCol(colName), lit)))
-          }).reduce(And)
+      case _ @ Not(in @ In(_: AttributeReference |
+                           _: GetStructField |
+                           _: GetMapValue, list: Seq[Literal])) =>
+        withNotNullColumnStat(in.value) {
+          colName =>
+            // only exclude file which min/max == inValue
+            list.map(lit => {
+              Not(And(EqualTo(minCol(colName), lit), EqualTo(maxCol(colName), lit)))
+            }).reduce(And)
         }
 
       case not @ Not(et @ EqualTo(_: AttributeReference |
                                   _: GetStructField |
                                   _: GetMapValue, right: Literal)) =>
-        val colName = getTargetColNameParts(et.left)
-        withNotNullColumnStat(colName) {
-          Not(And(EqualTo(minCol(colName), right), EqualTo(maxCol(colName), right)))
+        withNotNullColumnStat(et.left) {
+          colName => Not(And(EqualTo(minCol(colName), right), EqualTo(maxCol(colName), right)))
         }
 
       case not @ Not(et @ EqualTo(left: Literal, _: AttributeReference |
                                                  _: GetStructField |
                                                  _: GetMapValue)) =>
-        val colName = getTargetColNameParts(et.right)
-        withNotNullColumnStat(colName) {
-          Not(And(EqualTo(minCol(colName), left), EqualTo(maxCol(colName), left)))
+        withNotNullColumnStat(et.right) {
+          colName => Not(And(EqualTo(minCol(colName), left), EqualTo(maxCol(colName), left)))
         }
 
       case or: Or =>
@@ -316,58 +296,26 @@ case class DeltaScan(
         val resRight = rewriteDataFilters(or.right)
         Or(resLeft, resRight)
 
-      case a: And =>
-        val resLeft = rewriteDataFilters(a.left)
-        val resRight = rewriteDataFilters(a.right)
+      case and: And =>
+        val resLeft = rewriteDataFilters(and.left)
+        val resRight = rewriteDataFilters(and.right)
         And(resLeft, resRight)
 
       case _ @ StartsWith(attribute, value @ Literal(_: UTF8String, _)) =>
-        val colName = getTargetColNameParts(attribute)
-        withNotNullColumnStat(colName) {
-          Or(
-            // min <= value && max >= value
-            And(LessThanOrEqual(minCol(colName), value), GreaterThanOrEqual(maxCol(colName), value)),
-
-            // if min/max start with value, we should also return this file.
+        withNotNullColumnStat(attribute) {
+          colName =>
             Or(
-              StartsWith(minCol(colName), value), StartsWith(maxCol(colName), value)))
+              // min <= value && max >= value
+              And(
+                LessThanOrEqual(minCol(colName), value),
+                GreaterThanOrEqual(maxCol(colName), value)),
+              // if min/max start with value, we should also return this file.
+              Or(
+                StartsWith(minCol(colName), value), StartsWith(maxCol(colName), value)))
         }
 
       case expr: Expression =>
         throw new UnsupportedOperationException(s"unsupported expression: ${expr}")
     }
-  }
-
-  /**
-   * reference to [[org.apache.spark.sql.catalyst.plans.logical.DeltaUpdateTable.getTargetColNameParts()]].
-   *
-   * Extracts name parts from a resolved expression,
-   * but we should support [[GetMapValue]] in optimize operation.
-   *
-   * @param resolvedTargetCol
-   * @param errMsg
-   * @return
-   */
-  def getTargetColNameParts(resolvedTargetCol: Expression, errMsg: String = null): Seq[String] = {
-
-    def fail(extraMsg: String): Nothing = {
-      val msg = Option(errMsg).map(_ + " - ").getOrElse("") + extraMsg
-      throw new AnalysisException(msg)
-    }
-
-    def extractRecursively(expr: Expression): Seq[String] = expr match {
-      case attr: Attribute => Seq(attr.name)
-
-      case Alias(c, _) => extractRecursively(c)
-
-      case GetStructField(c, _, Some(name)) => extractRecursively(c) :+ name
-
-      case GetMapValue(left, lit: Literal) => extractRecursively(left) :+ lit.eval().toString
-
-      case other =>
-        fail(s"Found unsupported expression '$other' while parsing target column name parts")
-    }
-
-    extractRecursively(resolvedTargetCol)
   }
 }

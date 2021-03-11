@@ -13,15 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// scalastyle:off
+
 package org.apache.spark.sql.catalyst.plans.logical
 
-import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, NamedExpression}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Attribute, Expression, GetMapValue, GetStructField, Literal, NamedExpression}
+import org.apache.spark.sql.AnalysisException
 
 /**
- * 定义逻辑计划
- * @param child
- * @param zorderBy
+ * delta optimize command logical plan.
  */
 case class DeltaOptimize(
     child: LogicalPlan,
@@ -30,4 +29,40 @@ case class DeltaOptimize(
     outputFileNum: Int)
   extends UnaryNode {
   override def output: Seq[Attribute] = Seq.empty
+}
+
+object DeltaOptimize {
+  /**
+   * reference to
+   * [[org.apache.spark.sql.catalyst.plans.logical.DeltaUpdateTable.getTargetColNameParts()]].
+   *
+   * Extracts name parts from a resolved expression,
+   * but we should support [[GetMapValue]] in optimize operation.
+   *
+   * @param resolvedTargetCol
+   * @param errMsg
+   * @return
+   */
+  def getTargetColNameParts(resolvedTargetCol: Expression, errMsg: String = null): Seq[String] = {
+
+    def fail(extraMsg: String): Nothing = {
+      val msg = Option(errMsg).map(_ + " - ").getOrElse("") + extraMsg
+      throw new AnalysisException(msg)
+    }
+
+    def extractRecursively(expr: Expression): Seq[String] = expr match {
+      case attr: Attribute => Seq(attr.name)
+
+      case Alias(c, _) => extractRecursively(c)
+
+      case GetStructField(c, _, Some(name)) => extractRecursively(c) :+ name
+
+      case GetMapValue(left, lit: Literal) => extractRecursively(left) :+ lit.eval().toString
+
+      case other =>
+        fail(s"Found unsupported expression '$other' while parsing target column name parts")
+    }
+
+    extractRecursively(resolvedTargetCol)
+  }
 }

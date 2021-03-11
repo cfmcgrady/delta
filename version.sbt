@@ -1,1 +1,1 @@
-version in ThisBuild := "Ddelta-0.8.2-SNAPSHOT"
+version in ThisBuild := "Ddelta-0.8.4-SNAPSHOT"

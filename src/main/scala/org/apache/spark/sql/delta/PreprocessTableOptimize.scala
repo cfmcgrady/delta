@@ -17,9 +17,9 @@ package org.apache.spark.sql.delta
 
 import org.apache.spark.sql.catalyst.analysis.{EliminateSubqueryAliases, UnresolvedAttribute}
 import org.apache.spark.sql.catalyst.expressions.{Expression, SubqueryExpression}
-import org.apache.spark.sql.catalyst.plans.logical.{DeltaDelete, DeltaOptimize, DeltaUpdateTable, LogicalPlan}
+import org.apache.spark.sql.catalyst.plans.logical.{DeltaOptimize, DeltaUpdateTable, LogicalPlan}
 import org.apache.spark.sql.catalyst.rules.Rule
-import org.apache.spark.sql.delta.commands.{DeleteCommand, OptimizeCommand}
+import org.apache.spark.sql.delta.commands.OptimizeCommand
 import org.apache.spark.sql.internal.SQLConf
 
 /**

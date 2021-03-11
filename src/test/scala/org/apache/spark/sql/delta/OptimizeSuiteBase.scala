@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// scalstyle:off
-// TODO:(fchen) fix style
 package org.apache.spark.sql.delta
 
 import java.io.File
@@ -25,17 +23,13 @@ import scala.collection.JavaConverters._
 
 import io.delta.tables.DeltaTable
 import org.apache.hadoop.fs.Path
-import org.apache.spark.sql.{Column, DataFrame, QueryTest}
+
+import org.apache.spark.sql.{DataFrame, QueryTest}
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.test.{SharedSparkSession, SQLTestUtils}
 import org.apache.spark.util.Utils
-import org.apache.spark.SparkConf
 import org.scalatest.BeforeAndAfterEach
 
-/**
- * @time 2021/3/5 2:35 下午
- * @author fchen <cloud.chenfu@gmail.com>
- */
 class OptimizeSuiteBase
   extends QueryTest
     with SharedSparkSession
@@ -86,7 +80,7 @@ class OptimizeSuiteBase
     writer.save(deltaLog.dataPath.toString)
   }
 
-  protected def append(df: DataFrame, partitionBy: Seq[String] = Nil) = {
+  protected def append(df: DataFrame, partitionBy: Seq[String] = Nil): Unit = {
     saveTable(df, "append", Map.empty, partitionBy)
   }
 
@@ -96,34 +90,7 @@ class OptimizeSuiteBase
 
   implicit def jsonStringToSeq(json: String): Seq[String] = json.split("\n")
 
-  test("aa") {
-    val sparkSession = spark
-    import sparkSession.implicits._
-
-    println("hello")
-    val df = (1 to 100).toSeq.toDF("id")
-    append(df)
-    println(deltaLog.dataPath.toString)
-    val table = io.delta.tables.DeltaTable.forPath(spark, deltaLog.dataPath.toString)
-    table.optimize(Seq("id"), 16)
-    println("end")
-    val df2 = table.toDF.filter("id = 1")
-    df2.show
-    df2.collect()
-    println(table.toDF.count)
-
-    df2.queryExecution.executedPlan.collectLeaves().foreach(l => {
-      l.metrics.foreach {
-        case (key, metric) if (key == "numFiles") =>
-          println("numFile" + metric.value)
-        case _ =>
-      }
-    })
-//    Thread.sleep(Int.MaxValue)
-  }
-
-//  test("optimize partitioned table basic") {
-  test("cc") {
+  test("optimize partitioned table basic") {
     val sparkSession = spark
     import sparkSession.implicits._
     import org.apache.spark.sql.functions._
@@ -138,35 +105,19 @@ class OptimizeSuiteBase
     append(df, Seq("pid"))
     val table = io.delta.tables.DeltaTable.forPath(spark, deltaLog.dataPath.toString)
     table.optimize(Seq("col_1"), 16)
-//    Thread.sleep(Int.MaxValue)
     table.optimize(expr("pid = 'a'"), Seq("col_1"), 16)
-//    Thread.sleep(Int.MaxValue)
 //    table.toDF.filter("col_1 = 1").show()
     val df2 = table.toDF.filter("col_1 = 2")
-    df2.show
     df2.collect()
     df2.queryExecution.executedPlan.collectLeaves().foreach(l => {
       l.metrics.foreach {
         case (key, metric) if (key == "numFiles") =>
+          // scalastyle:off println
           println("numFile" + metric.value)
+          // scalastyle:on println
         case _ =>
       }
     })
-  }
-
-  test("bb") {
-    val sparkSession = spark
-    import sparkSession.implicits._
-
-    val df1 = Seq(("a", 1), ("b", 2)).toDF("ca1", "cb")
-    val df2 = Seq(("a", 1), ("b", 2)).toDF("ca2", "cc")
-    df1.alias("l").join(
-      df2.alias("r"),
-      $"l.ca1" === $"r.ca2"
-    ).selectExpr("r.*")
-      .show
-
-
   }
 
   test("zorder by integer type basic case.") {
@@ -209,10 +160,12 @@ class OptimizeSuiteBase
               .collectLeaves()
               .flatMap(_.metrics)
               .collect {
-                case m @ (key, metric) if (key == "numFiles" && metric.value == cond.numFiles.get) =>
-                  m
+                case m @ (key, metric)
+                  if (key == "numFiles" && metric.value == cond.numFiles.get) => m
               }
+            // scalastyle:off println
             println("check condition: " + cond.condition)
+            // scalastyle:on println
             assert(numFilesMetric.size == 1)
           }
           checkAnswer(res, input.filter(cond.condition).collect())
@@ -281,7 +234,6 @@ class OptimizeSuiteBase
     append(input)
     val table = io.delta.tables.DeltaTable.forPath(spark, deltaLog.dataPath.toString)
     table.optimize(Seq("col_1"), 3)
-    table.toDF.filter("'a' <> col_1").show()
     runZorderByFilterTest(
       table,
       input,
@@ -292,7 +244,7 @@ class OptimizeSuiteBase
     )
   }
 
-  test("ee") {
+  test("file filter with non-statistics partititon.") {
     val sparkSession = spark
     import sparkSession.implicits._
     import org.apache.spark.sql.functions._
@@ -302,73 +254,6 @@ class OptimizeSuiteBase
     table.optimize(expr("pid = 'pb'"), Seq("col_1"), 3)
     table.toDF.filter("col_1 <> 'a'").show()
     table.toDF.filter("col_1 <> 'a'").explain(true)
-  }
-
-  test("xx") {
-    val sparkSession = spark
-    import sparkSession.implicits._
-    import org.apache.spark.sql.functions._
-//    val input = spark.range(0, 32)
-//      .withColumn("pid", $"id" % 2)
-////      .repartition(16)
-////      .parti
-//
-//    val writer = input.write.format("delta")
-//    writer.partitionBy("pid")
-//    println(deltaLog.dataPath.toString)
-//    writer.save(deltaLog.dataPath.toString)
-//    Thread.sleep(Int.MaxValue)
-    val jsona = """
-      |{
-      |  "a": 1,
-      |  "b": {
-      |    "c": "value_c",
-      |    "d": {
-      |      "e": "value_3",
-      |      "f": 1.0
-      |    }
-      |  }
-      |}
-      |""".stripMargin
-    val jsonb =
-      """
-        |{"a": "b"}
-        |""".stripMargin
-
-    val jdf = spark.read.json(spark.sparkContext.parallelize(Seq(jsona)))
-    jdf.show
-    jdf.printSchema()
-
-    Seq(jsona).toDF("ca").show()
-    Seq(jsona).toDF("ca")
-      .withColumn("parsed_value", from_json($"ca", jdf.schema))
-//      .show()
-      .printSchema()
-
-  }
-
-  private def runZorderByFilterTest(table: DeltaTable,
-                                    input: DataFrame,
-                                    conditions: Seq[FilterTestInfo]): Unit = {
-    (conditions.map(c => c.copy(condition = exchangeLeftRight(c.condition))) ++ conditions)
-      .foreach {
-        case cond =>
-          val res = table.toDF.filter(cond.condition)
-          if (cond.numFiles.isDefined) {
-            res.collect()
-            val numFilesMetric = res.queryExecution
-              .executedPlan
-              .collectLeaves()
-              .flatMap(_.metrics)
-              .collect {
-                case m @ (key, metric) if (key == "numFiles" && metric.value == cond.numFiles.get) =>
-                  m
-              }
-            println("check condition: " + cond.condition)
-            assert(numFilesMetric.size == 1)
-          }
-          checkAnswer(res, input.filter(cond.condition).collect())
-      }
   }
 
   test("zorder by support map type") {
@@ -393,10 +278,30 @@ class OptimizeSuiteBase
     )
   }
 
-  override def sparkConf: SparkConf = {
-    val c = super.sparkConf
-    c.set("spark.ui.enabled", "true")
-    c
+  private def runZorderByFilterTest(table: DeltaTable,
+                                    input: DataFrame,
+                                    conditions: Seq[FilterTestInfo]): Unit = {
+    (conditions.map(c => c.copy(condition = exchangeLeftRight(c.condition))) ++ conditions)
+      .foreach {
+        case cond =>
+          val res = table.toDF.filter(cond.condition)
+          if (cond.numFiles.isDefined) {
+            res.collect()
+            val numFilesMetric = res.queryExecution
+              .executedPlan
+              .collectLeaves()
+              .flatMap(_.metrics)
+              .collect {
+                case m @ (key, metric)
+                  if (key == "numFiles" && metric.value == cond.numFiles.get) => m
+              }
+            // scalastyle:off println
+            println("check condition: " + cond.condition)
+            // scalastyle:on println
+            assert(numFilesMetric.size == 1)
+          }
+          checkAnswer(res, input.filter(cond.condition).collect())
+      }
   }
 
   private def exchangeLeftRight(condition: String): String = {
@@ -435,9 +340,5 @@ object FilterTestInfo {
   }
 
 }
-
-//object ScalaOptimizeSuite extends OptimizeSuiteBase {
-//  override protected def executeUpdate(target: String, set: String, where: String): Unit = ???
-//}
 
 case class TestCaseClass(info: String)
